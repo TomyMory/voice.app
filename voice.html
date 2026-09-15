@@ -1,1 +1,192 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ひらがなボイスブリッジ</title>
+    <!-- 物理エンジン Matter.js の読み込み -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; background-color: #87CEEB; font-family: sans-serif; }
+        #ui-layer { position: absolute; top: 10px; left: 10px; z-index: 10; background: rgba(255, 255, 255, 0.8); padding: 10px; border-radius: 8px; }
+        button { font-size: 16px; padding: 8px 16px; cursor: pointer; }
+        #status { margin-top: 10px; font-weight: bold; color: #333; }
+    </style>
+</head>
+<body>
 
+<div id="ui-layer">
+    <h3>ひらがなボイスブリッジ</h3>
+    <p>マイクを許可して「録音開始」を押しながら発声してください。</p>
+    <button id="record-btn">録音開始 (長押し)</button>
+    <button id="walk-btn" style="margin-left: 10px;">キャラクターを歩かせる</button>
+    <div id="status">待機中...</div>
+</div>
+
+<script>
+// --- 1. 物理エンジン (Matter.js) のセットアップ ---
+const Engine = Matter.Engine,
+      Render = Matter.Render,
+      Runner = Matter.Runner,
+      Bodies = Matter.Bodies,
+      Composite = Matter.Composite,
+      Events = Matter.Events;
+
+const engine = Engine.create();
+const width = window.innerWidth;
+const height = window.innerHeight;
+
+const render = Render.create({
+    element: document.body,
+    engine: engine,
+    options: {
+        width: width,
+        height: height,
+        wireframes: false,
+        background: '#87CEEB'
+    }
+});
+
+// 地形（左岸・右岸・穴）の作成
+const groundY = height - 100;
+const leftBankWidth = width * 0.3;
+const rightBankWidth = width * 0.3;
+const holeWidth = width * 0.4; // 穴の広さ
+
+const leftBank = Bodies.rectangle(leftBankWidth / 2, groundY, leftBankWidth, 200, { isStatic: true, render: { fillStyle: '#8B4513' } });
+const rightBank = Bodies.rectangle(width - (rightBankWidth / 2), groundY, rightBankWidth, 200, { isStatic: true, render: { fillStyle: '#8B4513' } });
+
+// キャラクターの作成（左岸に配置）
+const player = Bodies.circle(50, groundY - 150, 20, { 
+    restitution: 0.1, 
+    friction: 0.5,
+    render: { fillStyle: '#FF0000' }
+});
+
+Composite.add(engine.world, [leftBank, rightBank, player]);
+
+Render.run(render);
+const runner = Runner.create();
+Runner.run(runner, engine);
+
+// カスタム描画: ブロックにひらがなを描画するためのフック
+let textBlocks = [];
+Events.on(render, 'afterRender', function() {
+    const context = render.context;
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    textBlocks.forEach(block => {
+        context.font = `bold ${block.body.bounds.max.y - block.body.bounds.min.y - 10}px sans-serif`;
+        context.fillStyle = '#000';
+        context.fillText(block.text, block.body.position.x, block.body.position.y);
+    });
+});
+
+// --- 2. Web Audio API & Web Speech API のセットアップ ---
+let audioContext, analyser, microphone, dataArray;
+let isRecording = false;
+let maxVolume = 0;
+let startTime = 0;
+
+// 音声認識 (Chrome用)
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+const recognition = new SpeechRecognition();
+recognition.lang = 'ja-JP';
+recognition.interimResults = false;
+
+async function initAudio() {
+    if (!audioContext) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        microphone = audioContext.createMediaStreamSource(stream);
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 256;
+        microphone.connect(analyser);
+        dataArray = new Uint8Array(analyser.frequencyBinCount);
+    }
+}
+
+function updateVolume() {
+    if (!isRecording) return;
+    analyser.getByteFrequencyData(dataArray);
+    let sum = 0;
+    for (let i = 0; i < dataArray.length; i++) {
+        sum += dataArray[i];
+    }
+    let average = sum / dataArray.length;
+    if (average > maxVolume) maxVolume = average;
+    requestAnimationFrame(updateVolume);
+}
+
+const recordBtn = document.getElementById('record-btn');
+const statusText = document.getElementById('status');
+
+// ボタンを押している間だけ計測・認識
+recordBtn.addEventListener('mousedown', async () => {
+    await initAudio();
+    isRecording = true;
+    maxVolume = 0;
+    startTime = Date.now();
+    recognition.start();
+    updateVolume();
+    statusText.innerText = "録音中... 声を出してください";
+});
+
+recordBtn.addEventListener('mouseup', () => {
+    isRecording = false;
+    recognition.stop();
+    statusText.innerText = "解析中...";
+});
+
+// 認識結果を受け取ったときの処理
+recognition.onresult = (event) => {
+    const resultText = event.results[0][0].transcript;
+    // 簡単のため最初の1文字を取得（ひらがなに変換するなどの処理が本来は必要）
+    const char = resultText.charAt(0); 
+    const duration = Date.now() - startTime; // 発声時間(ミリ秒)
+
+    createHiraganaBlock(char, maxVolume, duration);
+    statusText.innerText = `認識: 「${char}」 / 音量: ${Math.floor(maxVolume)} / 長さ: ${duration}ms`;
+};
+
+// --- 3. ブロック生成とゲームロジック ---
+function createHiraganaBlock(char, volume, duration) {
+    // 音量(大きさ)と時間(長さ)をピクセルサイズにマッピング
+    // ※ゲームバランスの調整が必要な部分です
+    let blockHeight = Math.max(50, volume * 1.5); // 音量が大きいほど縦にデカい
+    let blockWidth = Math.max(50, duration / 15); // 時間が長いほど横に長い
+
+    // 大きすぎ・長すぎの制限（ゲーム性）
+    if (blockWidth > width * 0.8) blockWidth = width * 0.8;
+    
+    // 画面上部から落下させる
+    const block = Bodies.rectangle(width / 2, -100, blockWidth, blockHeight, {
+        restitution: 0.1,
+        friction: 0.8,
+        render: { fillStyle: '#FFFACD', strokeStyle: '#FFD700', lineWidth: 3 }
+    });
+
+    Composite.add(engine.world, block);
+    textBlocks.push({ body: block, text: char });
+}
+
+// キャラクターを歩かせるロジック（右方向へ力を加える）
+document.getElementById('walk-btn').addEventListener('click', () => {
+    // キャラクターに右向きの速度を与える
+    Matter.Body.setVelocity(player, { x: 5, y: player.velocity.y });
+    statusText.innerText = "歩行中...";
+    
+    // 落下チェック
+    const checkInterval = setInterval(() => {
+        if (player.position.y > height) {
+            statusText.innerText = "ゲームオーバー！穴に落ちました。";
+            clearInterval(checkInterval);
+        } else if (player.position.x > width - rightBankWidth / 2) {
+            statusText.innerText = "クリア！対岸にたどり着きました！";
+            clearInterval(checkInterval);
+        }
+    }, 100);
+});
+</script>
+</body>
+</html>
