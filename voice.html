@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ひらがなボイスブリッジ（改良版）</title>
+    <title>ひらがなボイスブリッジ（段差乗り越え対応版）</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
     <style>
         body { margin: 0; padding: 0; overflow: hidden; background-color: #E0F7FA; font-family: sans-serif; }
@@ -27,11 +27,10 @@
     <div id="status">マイクを許可して録音ボタンを長押ししてください</div>
 </div>
 
-<!-- 落下位置を示すマーカー -->
 <div id="target-marker"></div>
 
 <script>
-// --- 1. 物理エンジンのセットアップと地形生成 ---
+// --- 1. 物理エンジンのセットアップ ---
 const Engine = Matter.Engine,
       Render = Matter.Render,
       Runner = Matter.Runner,
@@ -54,37 +53,33 @@ const render = Render.create({
     }
 });
 
-// 地形の設定 (5分割: 左岸, 穴1, 中洲, 穴2, 右岸)
-const surfaceY = height - 150; // 地面の高さ
+const surfaceY = height - 150; 
 const segmentWidth = width / 5;
 
-// 地面ブロックの生成 (Y座標は中心位置なので厚さ200の半分100を足す)
 const groundOptions = { isStatic: true, render: { fillStyle: '#6D4C41' } };
 const leftBank = Bodies.rectangle(segmentWidth * 0.5, surfaceY + 100, segmentWidth, 200, groundOptions);
 const island = Bodies.rectangle(segmentWidth * 2.5, surfaceY + 100, segmentWidth, 200, groundOptions);
 const rightBank = Bodies.rectangle(segmentWidth * 4.5, surfaceY + 100, segmentWidth, 200, groundOptions);
 
-// キャラクター
+// キャラクター設定（少し滑りやすく調整）
 const player = Bodies.circle(50, surfaceY - 20, 20, { 
-    restitution: 0.2, friction: 0.1, render: { fillStyle: '#FF5252' }
+    restitution: 0.1, friction: 0.3, density: 0.01, render: { fillStyle: '#FF5252' }
 });
 
 Composite.add(engine.world, [leftBank, island, rightBank, player]);
 
-// 穴の管理
 const holes = [
     { index: 0, x: segmentWidth * 1.5, width: segmentWidth },
     { index: 1, x: segmentWidth * 3.5, width: segmentWidth }
 ];
 let currentHoleIndex = 0;
 
-// マーカーの初期位置設定
 const marker = document.getElementById('target-marker');
 function updateMarker() {
     if (currentHoleIndex < holes.length) {
         marker.style.left = holes[currentHoleIndex].x + 'px';
     } else {
-        marker.style.display = 'none'; // 全ての穴が塞がったら消す
+        marker.style.display = 'none'; 
     }
 }
 updateMarker();
@@ -93,7 +88,7 @@ Render.run(render);
 const runner = Runner.create();
 Runner.run(runner, engine);
 
-// --- 2. カスタム描画: 文字そのものを描画する ---
+// --- 2. 文字のカスタム描画 ---
 let textBlocks = [];
 Events.on(render, 'afterRender', function() {
     const context = render.context;
@@ -105,7 +100,6 @@ Events.on(render, 'afterRender', function() {
         const pos = body.position;
         const angle = body.angle;
         
-        // 物理ボディの幅と高さを取得
         const w = body.bounds.max.x - body.bounds.min.x;
         const h = body.bounds.max.y - body.bounds.min.y;
 
@@ -115,35 +109,32 @@ Events.on(render, 'afterRender', function() {
         context.textAlign = 'center';
         context.textBaseline = 'middle';
         
-        // 高さをフォントサイズとする
         context.font = `bold ${h}px ${selectedFont}`;
-        
-        // テキストの本来の幅を計測し、物理ボディの幅(w)に合わせるためのスケールを計算
         const textMetrics = context.measureText(text);
         const textWidth = textMetrics.width;
-        const scaleX = w / textWidth;
         
-        context.scale(scaleX, 1); // 声の長さに応じて横に引き伸ばす
-        context.fillStyle = '#37474F';
-        context.fillText(text, 0, 0);
+        // テキストの幅が0の場合はエラーを防ぐ
+        if(textWidth > 0) {
+            const scaleX = w / textWidth;
+            context.scale(scaleX, 1); 
+            context.fillStyle = body.isStatic ? '#1A237E' : '#37474F'; // 固定されたら色を少し変える
+            context.fillText(text, 0, 0);
+        }
         context.restore();
     });
 });
 
-// --- 3. 穴が塞がったかの自動判定 ---
+// --- 3. 穴が塞がったかの自動判定 ＆ 【修正】橋の固定化 ---
 Events.on(engine, 'afterUpdate', function() {
     if (currentHoleIndex >= holes.length) return;
     const targetHole = holes[currentHoleIndex];
     let isBridgeBuilt = false;
 
-    // 現在の穴の範囲にあるブロックを調べる
     for (let i = 0; i < textBlocks.length; i++) {
         const body = textBlocks[i].body;
-        // ブロックが穴のX座標範囲にあるか
         if (body.position.x > targetHole.x - targetHole.width / 2 &&
             body.position.x < targetHole.x + targetHole.width / 2) {
             
-            // ブロックがほぼ静止しており、かつ最上部が地面の高さ(surfaceY)付近に到達しているか
             if (body.speed < 1.0 && body.position.y > 0 && body.bounds.min.y <= surfaceY + 10) {
                 isBridgeBuilt = true;
                 break;
@@ -152,11 +143,20 @@ Events.on(engine, 'afterUpdate', function() {
     }
 
     if (isBridgeBuilt) {
+        // ★修正: 橋が完成したら、その穴付近にあるブロックを固定(isStatic=true)して崩れないようにする
+        textBlocks.forEach(b => {
+            const body = b.body;
+            if (body.position.x > targetHole.x - targetHole.width / 2 - 50 &&
+                body.position.x < targetHole.x + targetHole.width / 2 + 50) {
+                Matter.Body.setStatic(body, true);
+            }
+        });
+
         currentHoleIndex++;
         updateMarker();
         const statusText = document.getElementById('status');
         if (currentHoleIndex < holes.length) {
-            statusText.innerText = "橋が架かりました！次の穴へ移動します。";
+            statusText.innerText = "橋が固定されました！次の穴へ移動します。";
         } else {
             statusText.innerText = "全ての穴が塞がりました！キャラを歩かせてみましょう。";
         }
@@ -217,9 +217,8 @@ recordBtn.addEventListener('mouseup', () => {
 
 recognition.onresult = (event) => {
     const resultText = event.results[0][0].transcript;
-    const char = resultText.charAt(0); // 1文字目を取得
+    const char = resultText.charAt(0); 
     
-    // 発声の長さを最大5秒(5000ms)に制限
     let duration = Date.now() - startTime;
     if (duration > 5000) duration = 5000;
 
@@ -230,17 +229,18 @@ recognition.onresult = (event) => {
 function createHiraganaBlock(char, volume, duration) {
     if (currentHoleIndex >= holes.length) return;
     
-    // サイズ計算（調整可能）
     let blockHeight = Math.max(40, volume * 1.5);
-    let blockWidth = Math.max(40, (duration / 5000) * (width * 0.4)); // 最大5秒で画面幅の40%の長さ
-    
+    let blockWidth = Math.max(40, (duration / 5000) * (width * 0.4)); 
     const dropX = holes[currentHoleIndex].x;
 
-    // 物理ボディは見えないようにする (visible: false)
+    // ★修正: 角を丸く(chamfer)して、ボールが引っかかりにくくする
+    const chamferRadius = Math.min(blockWidth, blockHeight) * 0.15;
+
     const block = Bodies.rectangle(dropX, -100, blockWidth, blockHeight, {
         restitution: 0.1,
-        friction: 0.9, // 滑りにくくする
+        friction: 0.9, 
         density: 0.05,
+        chamfer: { radius: chamferRadius }, 
         render: { visible: false } 
     });
 
@@ -248,11 +248,11 @@ function createHiraganaBlock(char, volume, duration) {
     textBlocks.push({ body: block, text: char });
 }
 
-// --- 5. キャラクターの歩行制御 ---
+// --- 5. 【修正】キャラクターの歩行と段差乗り越え制御 ---
 document.getElementById('walk-btn').addEventListener('click', () => {
-    Matter.Body.setVelocity(player, { x: 4, y: player.velocity.y });
     statusText.innerText = "歩行中...";
     
+    // 50ミリ秒ごとに速度を監視・上書きして力強く進ませる
     const checkInterval = setInterval(() => {
         if (player.position.y > height) {
             statusText.innerText = "ゲームオーバー！落ちてしまいました...";
@@ -261,12 +261,17 @@ document.getElementById('walk-btn').addEventListener('click', () => {
             statusText.innerText = "クリア！！対岸にたどり着きました！";
             clearInterval(checkInterval);
         } else {
-            // 歩き続けるように力を加え続ける
-            if (player.velocity.x < 3) {
-                Matter.Body.applyForce(player, player.position, { x: 0.005, y: 0 });
+            // ★修正: 段差乗り越え（オートジャンプ）ロジック
+            if (player.velocity.x < 1.0) {
+                // X方向の速度が遅い＝段差に引っかかっている場合
+                // 少し上に速度を与えて(y: -5)ジャンプし、段差を強引によじ登る
+                Matter.Body.setVelocity(player, { x: 2, y: -5 });
+            } else {
+                // 通常は一定の速度(x: 3)で前進。Y軸は自然落下に任せる
+                Matter.Body.setVelocity(player, { x: 3, y: player.velocity.y });
             }
         }
-    }, 100);
+    }, 50);
 });
 </script>
 </body>
