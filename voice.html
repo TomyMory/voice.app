@@ -3,28 +3,35 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ひらがなボイスブリッジ</title>
-    <!-- 物理エンジン Matter.js の読み込み -->
+    <title>ひらがなボイスブリッジ（改良版）</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
     <style>
-        body { margin: 0; padding: 0; overflow: hidden; background-color: #87CEEB; font-family: sans-serif; }
-        #ui-layer { position: absolute; top: 10px; left: 10px; z-index: 10; background: rgba(255, 255, 255, 0.8); padding: 10px; border-radius: 8px; }
-        button { font-size: 16px; padding: 8px 16px; cursor: pointer; }
+        body { margin: 0; padding: 0; overflow: hidden; background-color: #E0F7FA; font-family: sans-serif; }
+        #ui-layer { position: absolute; top: 10px; left: 10px; z-index: 10; background: rgba(255, 255, 255, 0.9); padding: 15px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        button, select { font-size: 16px; padding: 8px 12px; margin-right: 5px; cursor: pointer; }
         #status { margin-top: 10px; font-weight: bold; color: #333; }
+        #target-marker { position: absolute; top: 0; width: 0; height: 0; border-left: 20px solid transparent; border-right: 20px solid transparent; border-top: 30px solid #FF5722; transform: translateX(-50%); transition: left 0.5s ease; z-index: 5; }
     </style>
 </head>
 <body>
 
 <div id="ui-layer">
     <h3>ひらがなボイスブリッジ</h3>
-    <p>マイクを許可して「録音開始」を押しながら発声してください。</p>
     <button id="record-btn">録音開始 (長押し)</button>
-    <button id="walk-btn" style="margin-left: 10px;">キャラクターを歩かせる</button>
-    <div id="status">待機中...</div>
+    <button id="walk-btn">キャラクターを歩かせる</button>
+    <select id="font-select">
+        <option value="sans-serif">ゴシック体</option>
+        <option value="serif">明朝体</option>
+        <option value="'ヒラギノ丸ゴ Pro W4', 'Hiragino Maru Gothic Pro', sans-serif">丸ゴシック</option>
+    </select>
+    <div id="status">マイクを許可して録音ボタンを長押ししてください</div>
 </div>
 
+<!-- 落下位置を示すマーカー -->
+<div id="target-marker"></div>
+
 <script>
-// --- 1. 物理エンジン (Matter.js) のセットアップ ---
+// --- 1. 物理エンジンのセットアップと地形生成 ---
 const Engine = Matter.Engine,
       Render = Matter.Render,
       Runner = Matter.Runner,
@@ -43,56 +50,127 @@ const render = Render.create({
         width: width,
         height: height,
         wireframes: false,
-        background: '#87CEEB'
+        background: '#E0F7FA'
     }
 });
 
-// 地形（左岸・右岸・穴）の作成
-const groundY = height - 100;
-const leftBankWidth = width * 0.3;
-const rightBankWidth = width * 0.3;
-const holeWidth = width * 0.4; // 穴の広さ
+// 地形の設定 (5分割: 左岸, 穴1, 中洲, 穴2, 右岸)
+const surfaceY = height - 150; // 地面の高さ
+const segmentWidth = width / 5;
 
-const leftBank = Bodies.rectangle(leftBankWidth / 2, groundY, leftBankWidth, 200, { isStatic: true, render: { fillStyle: '#8B4513' } });
-const rightBank = Bodies.rectangle(width - (rightBankWidth / 2), groundY, rightBankWidth, 200, { isStatic: true, render: { fillStyle: '#8B4513' } });
+// 地面ブロックの生成 (Y座標は中心位置なので厚さ200の半分100を足す)
+const groundOptions = { isStatic: true, render: { fillStyle: '#6D4C41' } };
+const leftBank = Bodies.rectangle(segmentWidth * 0.5, surfaceY + 100, segmentWidth, 200, groundOptions);
+const island = Bodies.rectangle(segmentWidth * 2.5, surfaceY + 100, segmentWidth, 200, groundOptions);
+const rightBank = Bodies.rectangle(segmentWidth * 4.5, surfaceY + 100, segmentWidth, 200, groundOptions);
 
-// キャラクターの作成（左岸に配置）
-const player = Bodies.circle(50, groundY - 150, 20, { 
-    restitution: 0.1, 
-    friction: 0.5,
-    render: { fillStyle: '#FF0000' }
+// キャラクター
+const player = Bodies.circle(50, surfaceY - 20, 20, { 
+    restitution: 0.2, friction: 0.1, render: { fillStyle: '#FF5252' }
 });
 
-Composite.add(engine.world, [leftBank, rightBank, player]);
+Composite.add(engine.world, [leftBank, island, rightBank, player]);
+
+// 穴の管理
+const holes = [
+    { index: 0, x: segmentWidth * 1.5, width: segmentWidth },
+    { index: 1, x: segmentWidth * 3.5, width: segmentWidth }
+];
+let currentHoleIndex = 0;
+
+// マーカーの初期位置設定
+const marker = document.getElementById('target-marker');
+function updateMarker() {
+    if (currentHoleIndex < holes.length) {
+        marker.style.left = holes[currentHoleIndex].x + 'px';
+    } else {
+        marker.style.display = 'none'; // 全ての穴が塞がったら消す
+    }
+}
+updateMarker();
 
 Render.run(render);
 const runner = Runner.create();
 Runner.run(runner, engine);
 
-// カスタム描画: ブロックにひらがなを描画するためのフック
+// --- 2. カスタム描画: 文字そのものを描画する ---
 let textBlocks = [];
 Events.on(render, 'afterRender', function() {
     const context = render.context;
-    context.textAlign = 'center';
-    context.textBaseline = 'middle';
-    textBlocks.forEach(block => {
-        context.font = `bold ${block.body.bounds.max.y - block.body.bounds.min.y - 10}px sans-serif`;
-        context.fillStyle = '#000';
-        context.fillText(block.text, block.body.position.x, block.body.position.y);
+    const selectedFont = document.getElementById('font-select').value;
+    
+    textBlocks.forEach(blockData => {
+        const body = blockData.body;
+        const text = blockData.text;
+        const pos = body.position;
+        const angle = body.angle;
+        
+        // 物理ボディの幅と高さを取得
+        const w = body.bounds.max.x - body.bounds.min.x;
+        const h = body.bounds.max.y - body.bounds.min.y;
+
+        context.save();
+        context.translate(pos.x, pos.y);
+        context.rotate(angle);
+        context.textAlign = 'center';
+        context.textBaseline = 'middle';
+        
+        // 高さをフォントサイズとする
+        context.font = `bold ${h}px ${selectedFont}`;
+        
+        // テキストの本来の幅を計測し、物理ボディの幅(w)に合わせるためのスケールを計算
+        const textMetrics = context.measureText(text);
+        const textWidth = textMetrics.width;
+        const scaleX = w / textWidth;
+        
+        context.scale(scaleX, 1); // 声の長さに応じて横に引き伸ばす
+        context.fillStyle = '#37474F';
+        context.fillText(text, 0, 0);
+        context.restore();
     });
 });
 
-// --- 2. Web Audio API & Web Speech API のセットアップ ---
-let audioContext, analyser, microphone, dataArray;
-let isRecording = false;
-let maxVolume = 0;
-let startTime = 0;
+// --- 3. 穴が塞がったかの自動判定 ---
+Events.on(engine, 'afterUpdate', function() {
+    if (currentHoleIndex >= holes.length) return;
+    const targetHole = holes[currentHoleIndex];
+    let isBridgeBuilt = false;
 
-// 音声認識 (Chrome用)
+    // 現在の穴の範囲にあるブロックを調べる
+    for (let i = 0; i < textBlocks.length; i++) {
+        const body = textBlocks[i].body;
+        // ブロックが穴のX座標範囲にあるか
+        if (body.position.x > targetHole.x - targetHole.width / 2 &&
+            body.position.x < targetHole.x + targetHole.width / 2) {
+            
+            // ブロックがほぼ静止しており、かつ最上部が地面の高さ(surfaceY)付近に到達しているか
+            if (body.speed < 1.0 && body.position.y > 0 && body.bounds.min.y <= surfaceY + 10) {
+                isBridgeBuilt = true;
+                break;
+            }
+        }
+    }
+
+    if (isBridgeBuilt) {
+        currentHoleIndex++;
+        updateMarker();
+        const statusText = document.getElementById('status');
+        if (currentHoleIndex < holes.length) {
+            statusText.innerText = "橋が架かりました！次の穴へ移動します。";
+        } else {
+            statusText.innerText = "全ての穴が塞がりました！キャラを歩かせてみましょう。";
+        }
+    }
+});
+
+
+// --- 4. 音声認識とブロック生成 ---
+let audioContext, analyser, microphone, dataArray;
+let isRecording = false, maxVolume = 0, startTime = 0;
+
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 const recognition = new SpeechRecognition();
 recognition.lang = 'ja-JP';
-recognition.interimResults = false;
 
 async function initAudio() {
     if (!audioContext) {
@@ -121,69 +199,72 @@ function updateVolume() {
 const recordBtn = document.getElementById('record-btn');
 const statusText = document.getElementById('status');
 
-// ボタンを押している間だけ計測・認識
 recordBtn.addEventListener('mousedown', async () => {
+    if (currentHoleIndex >= holes.length) {
+        statusText.innerText = "もう塞ぐ穴はありません。"; return;
+    }
     await initAudio();
-    isRecording = true;
-    maxVolume = 0;
-    startTime = Date.now();
-    recognition.start();
-    updateVolume();
-    statusText.innerText = "録音中... 声を出してください";
+    isRecording = true; maxVolume = 0; startTime = Date.now();
+    recognition.start(); updateVolume();
+    statusText.innerText = "録音中... 声を出してください（最大5秒）";
 });
 
 recordBtn.addEventListener('mouseup', () => {
-    isRecording = false;
-    recognition.stop();
+    if (!isRecording) return;
+    isRecording = false; recognition.stop();
     statusText.innerText = "解析中...";
 });
 
-// 認識結果を受け取ったときの処理
 recognition.onresult = (event) => {
     const resultText = event.results[0][0].transcript;
-    // 簡単のため最初の1文字を取得（ひらがなに変換するなどの処理が本来は必要）
-    const char = resultText.charAt(0); 
-    const duration = Date.now() - startTime; // 発声時間(ミリ秒)
+    const char = resultText.charAt(0); // 1文字目を取得
+    
+    // 発声の長さを最大5秒(5000ms)に制限
+    let duration = Date.now() - startTime;
+    if (duration > 5000) duration = 5000;
 
     createHiraganaBlock(char, maxVolume, duration);
-    statusText.innerText = `認識: 「${char}」 / 音量: ${Math.floor(maxVolume)} / 長さ: ${duration}ms`;
+    statusText.innerText = `認識:「${char}」 / 音量: ${Math.floor(maxVolume)} / 長さ: ${duration}ms`;
 };
 
-// --- 3. ブロック生成とゲームロジック ---
 function createHiraganaBlock(char, volume, duration) {
-    // 音量(大きさ)と時間(長さ)をピクセルサイズにマッピング
-    // ※ゲームバランスの調整が必要な部分です
-    let blockHeight = Math.max(50, volume * 1.5); // 音量が大きいほど縦にデカい
-    let blockWidth = Math.max(50, duration / 15); // 時間が長いほど横に長い
-
-    // 大きすぎ・長すぎの制限（ゲーム性）
-    if (blockWidth > width * 0.8) blockWidth = width * 0.8;
+    if (currentHoleIndex >= holes.length) return;
     
-    // 画面上部から落下させる
-    const block = Bodies.rectangle(width / 2, -100, blockWidth, blockHeight, {
+    // サイズ計算（調整可能）
+    let blockHeight = Math.max(40, volume * 1.5);
+    let blockWidth = Math.max(40, (duration / 5000) * (width * 0.4)); // 最大5秒で画面幅の40%の長さ
+    
+    const dropX = holes[currentHoleIndex].x;
+
+    // 物理ボディは見えないようにする (visible: false)
+    const block = Bodies.rectangle(dropX, -100, blockWidth, blockHeight, {
         restitution: 0.1,
-        friction: 0.8,
-        render: { fillStyle: '#FFFACD', strokeStyle: '#FFD700', lineWidth: 3 }
+        friction: 0.9, // 滑りにくくする
+        density: 0.05,
+        render: { visible: false } 
     });
 
     Composite.add(engine.world, block);
     textBlocks.push({ body: block, text: char });
 }
 
-// キャラクターを歩かせるロジック（右方向へ力を加える）
+// --- 5. キャラクターの歩行制御 ---
 document.getElementById('walk-btn').addEventListener('click', () => {
-    // キャラクターに右向きの速度を与える
-    Matter.Body.setVelocity(player, { x: 5, y: player.velocity.y });
+    Matter.Body.setVelocity(player, { x: 4, y: player.velocity.y });
     statusText.innerText = "歩行中...";
     
-    // 落下チェック
     const checkInterval = setInterval(() => {
         if (player.position.y > height) {
-            statusText.innerText = "ゲームオーバー！穴に落ちました。";
+            statusText.innerText = "ゲームオーバー！落ちてしまいました...";
             clearInterval(checkInterval);
-        } else if (player.position.x > width - rightBankWidth / 2) {
-            statusText.innerText = "クリア！対岸にたどり着きました！";
+        } else if (player.position.x > width - (segmentWidth / 2)) {
+            statusText.innerText = "クリア！！対岸にたどり着きました！";
             clearInterval(checkInterval);
+        } else {
+            // 歩き続けるように力を加え続ける
+            if (player.velocity.x < 3) {
+                Matter.Body.applyForce(player, player.position, { x: 0.005, y: 0 });
+            }
         }
     }, 100);
 });
